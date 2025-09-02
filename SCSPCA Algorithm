@@ -1,0 +1,214 @@
+import numpy as np
+from scipy.sparse.linalg import cg
+from scipy.linalg import lu_factor, lu_solve, svd, eigh
+import time
+import pandas as pd
+
+
+#The following function implements the soft-thresholding operator for the l1 norm.
+#For the sparse CSPCA problem lambda is expected to be $t\eta$
+# - Z returns the result after applying the soft-thresholding operator
+# - act_set saves the non-zero elements from Z
+# - inact_set saves the zero elements from Z
+def proximal_l1(b, lambda_, q):
+    Z = np.sign(b) * np.maximum(np.abs(b) - lambda_, 0)
+    act_set = (Z != 0).astype(int)
+    inact_set = 1 - act_set
+    return Z, act_set, inact_set
+
+#The following function generates a duplication matrix Dn and its pseudo-inverse pDn to be used later in the RSSN method.
+def duplication_matrix(q):
+    n = q * (q + 1) // 2
+    Dn = np.zeros((q * q, n))
+    idx = 0
+    for i in range(q):
+        for j in range(i, q):
+            Dn[i * q + j, idx] = 1
+            if i != j:
+                Dn[j * q + i, idx] = 1
+            idx += 1
+    pDn = np.linalg.pinv(Dn)
+    return Dn, pDn
+
+#Applies the Jacobian of the residual equation
+def linop(Blkd, x, q, t, reg):
+    V = np.zeros_like(x)
+    for i in range(q):
+        V[:, i] = Blkd[i] @ x[:, i]
+    return 2 * t * (V + V.T) + reg * x
+
+#The following function performs the optimization using the semi-smooth newton algorithm
+def semi_newton_matrix(n, q, W, t, C, mut, inner_tol, inner_max_iter, Lam0, Dn, pDn):
+    WtW = np.eye(q)
+    Wt = W.T
+    stop_flag = 0
+    Lam = Lam0.copy()
+    W_Lam_prod = C + 2 * t * (W @ Lam)
+    Z, Act_set, Inact_set = proximal_l1(W_Lam_prod, mut, q)
+    ZW = Z.T @ W
+    R_Lam = ZW + ZW.T - 2 * np.eye(q)
+    RE = pDn @ R_Lam.flatten()
+    r_l = np.linalg.norm(R_Lam, 'fro')
+
+    lambda_ = 0.2
+    j = 0
+
+    while r_l**2 > inner_tol:
+        reg = lambda_ * max(min(r_l, 0.1), 1e-11)
+        nnzZ = np.count_nonzero(Z)
+
+        if q < 15:
+            if nnzZ > q * (q + 1) // 2:
+                g = np.zeros((q * q, q * q))
+                for i in range(q):
+                    g[i*q:(i+1)*q, i*q:(i+1)*q] = Wt @ (Act_set[:, i, None] * W)
+                G = 4 * t * (pDn @ (g @ Dn))
+                lu, piv = lu_factor(G + reg * np.eye(q * (q + 1) // 2))
+                new_d = -lu_solve((lu, piv), RE)
+            else:
+                Wstack = np.zeros((nnzZ, q * q))
+                dim = 0
+                for i in range(q):
+                    row = np.where(Act_set[:, i])[0]
+                    Wstack[dim:dim+len(row), i*q:(i+1)*q] = W[row, :]
+                    dim += len(row)
+                V = Wstack @ Dn
+                U = 4 * t * (pDn @ Wstack.T)
+                lu, piv = lu_factor(np.eye(nnzZ) + (1/reg) * (V @ U))
+                new_d = -(1/reg * RE - (1/reg**2) * U @ lu_solve((lu, piv), V @ RE))
+            new_d = Dn @ new_d
+            new_d = new_d.reshape(q, q)
+        else:
+            Blkd = [None] * q
+            for i in range(q):
+                ind = Act_set[:, i].astype(bool)
+                if np.sum(ind) < n / 2:
+                    W_ind = W[ind, :]
+                    Blkd[i] = W_ind.T @ W_ind
+                else:
+                    ind = Inact_set[:, i].astype(bool)
+                    W_ind = Wt[:, ind]
+                    Blkd[i] = WtW - W_ind @ W_ind.T
+            new_d, _ = cg(lambda x: linop(Blkd, x, q, t, reg), -R_Lam, tol=min(1e-4, 1e-3 * r_l))
+            new_d = new_d.reshape(q, q)
+
+        t_new = 1.0
+        W_d_prod = 2 * t * (W @ new_d)
+        W_Lam_new_prod = W_Lam_prod + t_new * W_d_prod
+        Z, Act_set, Inact_set = proximal_l1(W_Lam_new_prod, mut, q)
+        ZW = Z.T @ W
+        R_Lam_new = ZW + ZW.T - 2 * np.eye(q)
+        r_l_new = np.linalg.norm(R_Lam_new, 'fro')
+
+        while r_l_new**2 >= r_l**2 * (1 - 0.001 * t_new) and t_new > 1e-3:
+            t_new *= 0.5
+            W_Lam_new_prod = W_Lam_prod + t_new * W_d_prod
+            Z, Act_set, Inact_set = proximal_l1(W_Lam_new_prod, mut, q)
+            ZW = Z.T @ W
+            R_Lam_new = ZW + ZW.T - 2 * np.eye(q)
+            r_l_new = np.linalg.norm(R_Lam_new, 'fro')
+
+        Lam += t_new * new_d
+        r_l = r_l_new
+        R_Lam = R_Lam_new
+        RE = pDn @ R_Lam.flatten()
+        W_Lam_prod = W_Lam_new_prod
+
+        if j > inner_max_iter:
+            stop_flag = 1
+            break
+        j += 1
+
+    return Z, j, Lam, r_l, stop_flag
+
+#This is the ManPG algorithm adapted specifically for SCSPCA. The projection matrix W is initialised based on the standard CSPCA method.
+def manpg_orth_sparse(C, q, n, eta, maxiter=10000, tol=1e-5, inner_iter=50, phi_init=None):
+    start_time = time.time()
+
+    #eta corresponds to the sparsity parameter, phi is defined as the solution to the standard CSPCA problem.
+    eta = eta.reshape(-1, 1)
+    if phi_init is None:
+        eigenvalues, eigenvectors = eigh(C)
+        phi_init = eigenvectors[:, -q:]
+
+    Dn, pDn = duplication_matrix(q)
+    L = 2 * abs(max(eigenvalues))
+    t = 2 / L
+    t_min = 1e-4
+    #tol = tol * n * q increase the tolerance based on the original paper!
+
+    # Initialization
+    W = phi_init.copy()
+    AW = C @ W
+    F = [-np.sum(W * AW) + np.sum(eta * np.abs(W))]
+    num_inner = np.zeros(maxiter)
+    num_linesearch = 0
+    num_inexact = 0
+    alpha = 1.0
+
+    for iter_ in range(1, maxiter):
+        ngx = 2 * AW
+        neg_pgx = ngx
+
+        if alpha < t_min or num_inexact > 10:
+            inner_tol = max(5e-16, min(1e-14, 1e-5 * tol * t**2))
+        else:
+            inner_tol = max(1e-13, min(1e-11, 1e-3 * tol * t**2))
+
+        Lam_init = np.zeros((q, q)) if iter_ == 1 else Lam
+        PY, num_inner[iter_], Lam, _, in_flag = semi_newton_matrix(
+            n, q, W, t, W + t * neg_pgx, eta * t, inner_tol, inner_iter, Lam_init, Dn, pDn
+        )
+        if in_flag:
+            num_inexact += 1
+
+        alpha = 1.0
+        D = PY - W
+        def orthonormalize_stable(PY, epsilon=1e-8):
+            M = PY.T @ PY + epsilon * np.eye(PY.shape[1])
+            U, Sigma, Vt = svd(M, full_matrices=False)
+            Sigma_inv_sqrt = np.diag([1 / np.sqrt(s) if s > epsilon else 0.0 for s in Sigma])
+            return PY @ (U @ Sigma_inv_sqrt @ Vt)
+
+        Z = orthonormalize_stable(PY)
+        #U, Sigma, Vt = svd(PY.T @ PY, full_matrices=False)
+        #Z = PY @ (U @ np.diag(np.sqrt(1 / Sigma)) @ Vt)
+        AZ = C @ Z
+        f_trial = -np.sum(Z * AZ)
+        F_trial = f_trial + np.sum(eta * np.abs(Z))
+        normDsquared = np.linalg.norm(D, 'fro')**2
+
+        if normDsquared / t**2 < tol:
+            break
+
+        while F_trial >= F[-1] - 0.5 / t * alpha * normDsquared:
+            alpha *= 0.5
+            num_linesearch += 1
+            if alpha < t_min:
+                num_inexact += 1
+                break
+            PY = W + alpha * D
+            Z = orthonormalize_stable(PY)
+            #U, Sigma, Vt = svd(PY.T @ PY, full_matrices=False)
+            #Z = PY @ (U @ np.diag(np.sqrt(1 / Sigma)) @ Vt)
+            AZ = C @ Z
+            f_trial = -np.sum(Z * AZ)
+            F_trial = f_trial + np.sum(eta * np.abs(Z))
+
+        W = Z
+        AW = AZ
+        F.append(F_trial)
+
+    W_manpg = W
+    time_manpg = time.time() - start_time
+    mean_ssn = np.sum(num_inner) / iter_
+
+    sparsity = np.count_nonzero(W_manpg == 0) / (n * q)
+    F_manpg = F[-1]
+    flag_succ = 1 if iter_ < maxiter - 1 else 0
+
+    print(f"ManPG: Iter {iter_}, Fval {min(F):.5e}, CPU {time_manpg:.2f}, "
+          f"Sparsity {sparsity:.2f}, Inner Inexact {num_inexact}, "
+          f"Avg Inner {mean_ssn:.2f}, Total Linesearch {num_linesearch}")
+
+    return W_manpg, F_manpg, sparsity, time_manpg, iter_, flag_succ, num_linesearch, mean_ssn
