@@ -1,0 +1,741 @@
+import numpy as onp 
+import pandas as pd
+from sklearn.decomposition import PCA
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.linear_model import LinearRegression
+from sklearn.metrics import mean_squared_error
+from sklearn.preprocessing import StandardScaler
+from scipy.spatial.distance import cdist
+from scipy import linalg
+from numpy.linalg import inv, det
+from scipy.linalg import svd, qr, pinv, eigh
+import time
+from scipy.linalg import lu_factor, lu_solve
+from scipy.sparse.linalg import cg
+from scipy.sparse.linalg import svds, aslinearoperator, LinearOperator
+from sklearn.linear_model import Lasso
+from sklearn.model_selection import train_test_split
+import warnings
+
+# Supervised PCA using HSIC
+
+def rbf_kernel(Y, sigma):
+    dist_matrix = cdist(Y, Y, 'euclidean')
+    K = np.exp(-dist_matrix**2 / (2 * sigma**2))
+    return K
+
+def spca_hsic(X, Y, K, q):
+    C = X.T @ K @ X
+    eigenvalues, eigenvectors = linalg.eigh(C)
+    sorted_indices = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[sorted_indices]
+    eigenvectors = eigenvectors[:, sorted_indices]
+    W = eigenvectors[:, :q]
+    return {'W': W, 'eigenvalues': eigenvalues[:q]}
+
+# Covariance Supervised PCA (CSPCA)
+
+def cspca(X, Y, q, lambda_):
+    XtX = X.T @ X
+    XtY = X.T @ Y
+    YtX = Y.T @ X
+    C = XtY @ YtX + lambda_ * XtX
+    eigenvalues, eigenvectors = linalg.eigh(C)
+    sorted_indices = np.argsort(eigenvalues)[::-1]
+    eigenvalues = eigenvalues[sorted_indices]
+    eigenvectors = eigenvectors[:, sorted_indices]
+    W = eigenvectors[:, :q]
+    return {'W': W, 'eigenvalues': eigenvalues[:q]}
+
+
+# Sparse PLS (SPLS)
+
+def ust(b, eta):
+    b_ust = np.zeros_like(b)
+    if eta < 1:
+        valb = np.abs(b) - eta * np.max(np.abs(b))
+        mask = valb >= 0
+        b_ust[mask] = valb[mask] * np.sign(b)[mask]
+    return b_ust
+
+def spls_dv(Z, eta, kappa, eps, maxstep):
+    p, q = Z.shape
+    Znorm1 = np.median(np.abs(Z))
+    Z = Z / Znorm1 if Znorm1 > 0 else Z
+    if q == 1:
+        c = ust(Z.ravel(), eta)
+    else:
+        M = Z @ Z.T
+        dis = 10
+        i = 1
+        if kappa == 0.5:
+            c = np.ones(p) * 10
+            c_old = c.copy()
+            while dis > eps and i <= maxstep:
+                mcsvd = linalg.svd(M @ c, full_matrices=False)
+                a = mcsvd[0] @ mcsvd[2].T
+                c = ust(M @ a, eta)
+                dis = np.max(np.abs(c - c_old))
+                c_old = c.copy()
+                i += 1
+        elif 0 < kappa < 0.5:
+            kappa2 = (1 - kappa) / (1 - 2 * kappa)
+            c = np.ones(p) * 10
+            c_old = c.copy()
+            def h(lambda_val, M, c, kappa2):
+                alpha = linalg.solve(M + lambda_val * np.eye(p), M @ c)
+                return alpha.T @ alpha - 1 / kappa2**2
+            while dis > eps and i <= maxstep:
+                while h(eps, M, c, kappa2) * h(1e30, M, c, kappa2) > 0:
+                    if h(eps, M, c, kappa2) <= 1e5:
+                        M *= 2
+                        c *= 2
+                lambdas = root_scalar(
+                    lambda x: h(x, M, c, kappa2),
+                    bracket=[eps, 1e30],
+                    method="brentq"
+                ).root
+                a = kappa2 * linalg.solve(M + lambdas * np.eye(p), M @ c)
+                c = ust(M @ a, eta)
+                dis = np.max(np.abs(c - c_old))
+                c_old = c.copy()
+                i += 1
+    return c
+
+
+def correctp(x, y, eta, K, kappa, select, fit):
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if x.ndim == 1:
+        x = x[:, np.newaxis]
+    if y.ndim == 1:
+        y = y[:, np.newaxis]
+    n, p = x.shape
+    eta = np.atleast_1d(eta)
+    if np.min(eta) < 0 or np.max(eta) >= 1:
+        if np.max(eta) == 1:
+            raise ValueError("eta should be strictly less than 1!")
+        raise ValueError("eta should be between 0 and 1!")
+    K = np.atleast_1d(K)
+    if np.max(K) > p:
+        raise ValueError("K cannot exceed the number of predictors!")
+    if np.max(K) >= n:
+        raise ValueError("K cannot exceed the sample size!")
+    if np.min(K) <= 0 or not np.all(K == K.astype(int)):
+        raise ValueError("K should be a positive integer!")
+    if kappa > 0.5 or kappa < 0:
+        print("kappa should be between 0 and 0.5! kappa=0.5 is used.")
+        kappa = 0.5
+    if select not in ["pls2", "simpls"]:
+        print("Invalid PLS algorithm for variable selection. pls2 algorithm is used.")
+        select = "pls2"
+    valid_fits = ["simpls", "kernelpls", "widekernelpls", "oscorespls"]
+    if fit not in valid_fits:
+        print("Invalid PLS algorithm for model fitting. simpls algorithm is used.")
+        fit = "simpls"
+    return {"K": K[0], "eta": eta[0], "kappa": kappa, "select": select, "fit": fit}
+
+
+def spls(x, y, K, eta, kappa=0.5, select="pls2", fit="simpls", scale_x=True, scale_y=False,
+         eps=1e-4, maxstep=100, trace=False):
+    x = np.asarray(x)
+    y = np.asarray(y)
+    if x.ndim == 1:
+        x = x[:, np.newaxis]
+    if y.ndim == 1:
+        y = y[:, np.newaxis]
+    n, p = x.shape
+    q = y.shape[1]
+    ip = np.arange(p)
+    params = correctp(x, y, eta, K, kappa, select, fit)
+    K = params["K"]
+    eta = params["eta"]
+    kappa = params["kappa"]
+    select = params["select"]
+    fit = params["fit"]
+    mu = np.mean(y, axis=0)
+    y = y - mu
+    meanx = np.mean(x, axis=0)
+    x = x - meanx
+    if scale_x:
+        normx = np.sqrt(np.sum(x**2, axis=0) / (n - 1))
+        if np.any(normx < np.finfo(float).eps):
+            raise ValueError("Some columns of X have zero variance")
+        x = x / normx
+    else:
+        normx = np.ones(p)
+    if scale_y:
+        normy = np.sqrt(np.sum(y**2, axis=0) / (n - 1))
+        if np.any(normy < np.finfo(float).eps):
+            raise ValueError("Some columns of Y have zero variance")
+        y = y / normy
+    else:
+        normy = np.ones(q)
+    betahat = np.zeros((p, q))
+    betamat = []
+    x1 = x.copy()
+    y1 = y.copy()
+    new2As = []
+    xnames = np.arange(p)
+    for k in range(K):
+        Z = x1.T @ y1
+        what = spls_dv(Z, eta, kappa, eps, maxstep)
+        A = np.unique(np.where((np.abs(what) > 0) | (np.abs(betahat[:, 0]) > 0))[0])
+        new2A = np.where((np.abs(what) > 0) & (np.abs(betahat[:, 0]) == 0))[0]
+        xA = x[:, A]
+        plsfit = PLSRegression(n_components=min(k + 1, len(A)), scale=False)
+        plsfit.fit(xA, y)
+        betahat = np.zeros((p, q))
+        coef = plsfit.coef_
+        if q == 1:
+            if coef.ndim == 1:
+                coef = coef[:, np.newaxis]
+            elif coef.shape[0] == 1:
+                coef = coef.T
+        betahat[A, :] = coef
+        betamat.append(betahat.copy())
+        pj = plsfit.x_rotations_
+        if pj.ndim == 1:
+            pj = pj[:, np.newaxis]
+        if select == "pls2":
+            y1 = y - x @ betahat
+        elif select == "simpls":
+            pw = pj @ linalg.solve(pj.T @ pj, pj.T)
+            x1 = x.copy()
+            x1[:, A] = x[:, A] - x[:, A] @ pw
+        new2As.append(new2A)
+        if trace:
+            print(f"- {k+1}th step (K={k+1}):")
+            if len(new2A) <= 10:
+                print(xnames[new2A])
+            else:
+                nlines = int(np.ceil(len(new2A) / 10))
+                for i in range(nlines - 1):
+                    print(xnames[new2A[i*10:(i+1)*10]])
+                print(xnames[new2A[(nlines-1)*10:]])
+    result = {
+        "x": x,
+        "y": y,
+        "betahat": betahat,
+        "A": A,
+        "betamat": betamat,
+        "new2As": new2As,
+        "mu": mu,
+        "meanx": meanx,
+        "normx": normx,
+        "normy": normy,
+        "eta": eta,
+        "K": K,
+        "kappa": kappa,
+        "select": select,
+        "fit": fit,
+        "projection": pj
+    }
+    return result
+
+
+# Sparse PCA (SPCA)
+
+def rootmatrix(x):
+    eigvals, eigvecs = np.linalg.eigh(x)
+    eigvals = (eigvals + np.abs(eigvals)) / 2
+    sqrt_d = np.sqrt(eigvals)
+    return eigvecs @ np.diag(sqrt_d) @ eigvecs.T
+
+def convcheck(beta1, beta2):
+    a = np.max(np.abs(beta1 + beta2), axis=0)
+    b = np.max(np.abs(beta1 - beta2), axis=0)
+    d = len(a)
+    x = np.minimum(a, b)
+    return np.max(x)
+
+def updateRR(xnew, R=None, xold=None, lambda_=0, eps=1e-16):
+    xtx = (np.sum(xnew**2) + lambda_) / (1 + lambda_)
+    norm_xnew = np.sqrt(xtx)
+    if R is None:
+        R = np.array([[norm_xnew]])
+        return R, 1
+    Xtx = np.dot(xnew.T, xold) / (1 + lambda_)
+    r = linalg.solve_triangular(R, Xtx, lower=False, trans='T')
+    rpp = norm_xnew**2 - np.sum(r**2)
+    if rpp <= eps:
+        rpp = eps
+        rank = R.shape[0]
+    else:
+        rpp = np.sqrt(rpp)
+        rank = R.shape[0] + 1
+    R_new = np.zeros((R.shape[0] + 1, R.shape[1] + 1))
+    R_new[:-1, :-1] = R
+    R_new[:-1, -1] = r
+    R_new[-1, -1] = rpp
+    return R_new, rank
+
+def solvebeta(x, y, paras, max_steps=None, sparse="penalty", eps=1e-16):
+    lambda_ = paras[0]
+    penalty_param = paras[1]
+    n, m = x.shape
+    im = np.arange(m)
+    one = np.ones(n)
+    if lambda_ > 0:
+        maxvars = m
+    else:
+        maxvars = min(m, n - 1)
+        if m == n:
+            maxvars = m
+    if max_steps is None:
+        max_steps = 50 * maxvars
+    d1 = np.sqrt(lambda_)
+    d2 = 1 / np.sqrt(1 + lambda_)
+    Cvec = np.dot(y.T, x) * d2
+    ssy = np.sum(y**2)
+    residuals = np.concatenate([y, np.zeros(m)])
+    penalty = np.array([np.max(np.abs(Cvec))])
+    if sparse == "penalty" and penalty[0] * 2 / d2 <= penalty_param:
+        return np.zeros(m)
+    beta = np.zeros(m)
+    first_in = np.zeros(m, dtype=int)
+    active = []
+    ignores = []
+    actions = [None] * max_steps
+    Sign = []
+    R = None
+    k = 0
+    while k < max_steps and len(active) < maxvars - len(ignores):
+        action = []
+        k += 1
+        inactive = im if k == 1 else np.setdiff1d(im, active + ignores)
+        C = Cvec[inactive]
+        Cmax = np.max(np.abs(C))
+        new = np.abs(C) == Cmax
+        C = C[~new]
+        new = inactive[new]
+        for inew in new:
+            R, rank = updateRR(x[:, inew], R, x[:, active] if active else None, lambda_, eps)
+            if rank == len(active):
+                R = R[:len(active), :len(active)] if len(active) > 0 else np.array([[]])
+                ignores.append(inew)
+                action.append(-inew)
+            else:
+                if first_in[inew] == 0:
+                    first_in[inew] = k
+                active.append(inew)
+                Sign.append(np.sign(Cvec[inew]))
+                action.append(inew)
+        Gi1 = linalg.solve_triangular(R, linalg.solve_triangular(R, Sign, lower=False, trans='T'), lower=False)
+        A = 1 / np.sqrt(np.sum(Gi1 * Sign))
+        w = A * Gi1
+        u1 = np.dot(x[:, active], w) * d2
+        u2 = np.zeros(m)
+        u2[active] = d1 * d2 * w
+        u = np.concatenate([u1, u2])
+        if len(active) == maxvars - len(ignores):
+            gamhat = Cmax / A
+        else:
+            a = (np.dot(u1, x[:, np.setdiff1d(im, active + ignores)]) + d1 * u2[np.setdiff1d(im, active + ignores)]) * d2
+            gam = np.concatenate([(Cmax - C) / (A - a), (Cmax + C) / (A + a)])
+            gamhat = np.min(gam[gam > eps]) if len(gam) > 0 else Cmax / A
+        dropid = None
+        b1 = beta[active]
+        z1 = -b1 / w
+        zmin = np.min(z1[z1 > eps]) if np.any(z1 > eps) else gamhat
+        drops = False
+        if zmin < gamhat:
+            gamhat = zmin
+            drops = z1 == zmin
+        beta2 = beta.copy()
+        beta[active] += gamhat * w
+        residuals -= gamhat * u
+        Cvec = (np.dot(residuals[:n], x) + d1 * residuals[n:]) * d2
+        penalty = np.append(penalty, penalty[-1] - np.abs(gamhat * A))
+        if sparse == "penalty" and penalty[-1] * 2 / d2 <= penalty_param:
+            s1 = penalty[-1] * 2 / d2
+            s2 = penalty[-2] * 2 / d2 if len(penalty) > 1 else s1
+            beta = ((s2 - penalty_param) / (s2 - s1)) * beta + ((penalty_param - s1) / (s2 - s1)) * beta2
+            beta *= d2
+            break
+        if isinstance(drops, np.ndarray) and drops.any() or drops is True:  # Handle both array and boolean
+            dropid = np.where(drops)[0] if isinstance(drops, np.ndarray) else []
+            for id in reversed(dropid):
+                R = R[:-1, :-1] if R.shape[0] > 1 else np.array([[]])
+            dropid = np.array(active)[drops] if isinstance(drops, np.ndarray) else []
+            beta[dropid] = 0
+            active = [a for i, a in enumerate(active) if not drops[i]] if isinstance(drops, np.ndarray) else active
+            Sign = [s for i, s in enumerate(Sign) if not drops[i]] if isinstance(drops, np.ndarray) else Sign
+        if sparse == "varnum" and len(active) >= penalty_param:
+            break
+        actions[k-1] = action
+    return beta
+
+def spca(x, K, para, type_="predictor", sparse="penalty", use_corr=False, lambda_=1e-6, max_iter=200, trace=False, eps_conv=1e-3):
+    x = np.asarray(x)
+    n, p = x.shape if type_ == "predictor" else (None, x.shape[0])
+
+    if type_ == "predictor":
+        if n / p >= 100:
+            print("Consider using type='Gram' with the sample covariance/correlation matrix for efficiency.")
+        mean_x = np.mean(x, axis=0)
+        scale_x = np.std(x, axis=0) if use_corr else np.ones(p)
+        if use_corr:
+            scale_x[scale_x == 0] = 1.0
+        x = (x - mean_x) / scale_x
+    elif type_ == "Gram":
+        x = rootmatrix(x)
+
+    U, s, Vt = linalg.svd(x, full_matrices=False)
+    v = Vt.T
+    total_variance = np.sum(s**2)
+    alpha = v[:, :K]
+    beta = alpha.copy()
+
+    for i in range(K):
+        y = np.dot(x, alpha[:, i])
+        beta[:, i] = solvebeta(x, y, paras=[lambda_, para[i]], sparse=sparse)
+
+    xtx = np.dot(x.T, x)
+    temp = beta.copy()
+    norm_temp = np.sqrt(np.sum(temp**2, axis=0))
+    norm_temp[norm_temp == 0] = 1
+    temp = temp / norm_temp
+
+    k = 0
+    diff = 1
+    while k < max_iter and diff > eps_conv:
+        k += 1
+        alpha = np.dot(xtx, beta)
+        U, _, Vt = linalg.svd(alpha, full_matrices=False)
+        alpha = np.dot(U, Vt)
+
+        for i in range(K):
+            y = np.dot(x, alpha[:, i])
+            beta[:, i] = solvebeta(x, y, paras=[lambda_, para[i]], sparse=sparse)
+
+        norm_beta = np.sqrt(np.sum(beta**2, axis=0))
+        norm_beta[norm_beta == 0] = 1
+        beta2 = beta / norm_beta
+        diff = convcheck(beta2, temp)
+        temp = beta2
+
+        if trace and k % 10 == 0:
+            print(f"Iterations: {k}")
+
+    norm_beta = np.sqrt(np.sum(beta**2, axis=0))
+    norm_beta[norm_beta == 0] = 1
+    beta = beta / norm_beta
+
+    u = np.dot(x, beta)
+    R = np.linalg.qr(u)[1]
+    pev = np.diag(R**2) / total_variance
+
+    result = {
+        "type": type_,
+        "K": K,
+        "loadings": beta,
+        "pev": pev,
+        "var_all": total_variance,
+        "para": para,
+        "lambda": lambda_
+    }
+    return result
+
+
+
+# Sparse Supervised PCA (SSPCA)
+
+
+def soft_threshold(a, tau):
+    """
+    Soft thresholding operator for L1 regularization.
+
+    Parameters:
+    a : ndarray
+        Input vector
+    tau : float
+        Threshold value
+
+    Returns:
+    ndarray
+        Thresholded vector
+    """
+    return np.sign(a) * np.maximum(np.abs(a) - tau, 0)
+
+def find_tau(a, c, max_iter=5000, tol=1e-4):
+    v_temp = soft_threshold(a, 0)
+    if np.linalg.norm(v_temp) > 0:
+        v_temp = v_temp / np.linalg.norm(v_temp)
+        if np.sum(np.abs(v_temp)) <= c:
+            return 0
+
+    tau_min, tau_max = 0, np.max(np.abs(a))
+    best_tau, best_norm_diff = 0, float('inf')
+
+    for _ in range(max_iter):
+        tau = (tau_min + tau_max) / 2
+        v_temp = soft_threshold(a, tau)
+        if np.linalg.norm(v_temp) > 0:
+            v_temp = v_temp / np.linalg.norm(v_temp)
+            l1_norm = np.sum(np.abs(v_temp))
+            norm_diff = abs(l1_norm - c)
+
+            if norm_diff < best_norm_diff:
+                best_tau, best_norm_diff = tau, norm_diff
+
+            if norm_diff < tol:
+                return tau
+
+            if l1_norm > c:
+                tau_min = tau
+            else:
+                tau_max = tau
+        else:
+            tau_min = tau  
+
+    print(f"Warning: Tau search did not converge within tolerance (best norm diff: {best_norm_diff:.6f})")
+    return best_tau
+
+
+
+def compute_kernel(Y, kernel_type='linear', sigma=1.0, epsilon=1e-6):
+    n = Y.shape[0]
+    Y = Y.reshape(-1, 1)  
+
+    if kernel_type == 'linear':
+        L = Y @ Y.T  
+    elif kernel_type == 'rbf':
+        pairwise_dists = np.sum(Y**2, axis=1).reshape(-1, 1) + np.sum(Y**2, axis=1) - 2 * (Y @ Y.T)
+        L = np.exp(-pairwise_dists / (2 * sigma**2))  
+    elif kernel_type == 'delta':
+        # Delta kernel: 1 if Y_i == Y_j, else 0 (for classification)
+        L = (Y == Y.T).astype(float)
+    else:
+        raise ValueError(f"Unsupported kernel type: {kernel_type}")
+    L += epsilon * np.eye(n)
+    return L
+
+
+
+
+
+def sspca(X, Y, K, c, X_test=None, Y_test=None, kernel_type='linear',
+          sigma=1.0, max_iter=10000, tol=1e-6, verbose=False, standardize=True):
+    """
+    Parameters:
+    X : ndarray
+        Input training data matrix (n x p)
+    Y : ndarray
+        Target variable (n x 1 or n for classification)
+    K : int
+        Number of components
+    c : float
+        L1 regularization parameter (1 <= c <= sqrt(p))
+    X_test : ndarray, optional
+        Test data matrix (m x p)
+    Y_test : ndarray, optional
+        Test target variable (m x 1 or m)
+    kernel_type : str
+        Type of kernel for L ('linear', 'rbf', 'delta')
+    sigma : float
+        RBF kernel bandwidth
+    max_iter : int
+        Maximum iterations for convergence
+    tol : float
+        Convergence tolerance
+    verbose : bool
+        If True, print iteration details
+    standardize : bool
+        If True, standardize X and Y
+
+    Returns:
+    dict
+        Contains:
+        - Z: Dimension reduced training data (n x K)
+        - V: Sparse eigenvectors (p x K)
+        - U: Left singular vectors (n x K)
+        - Lambda: Singular values (K,)
+        - Y_pred_train: Predicted Y for training data
+        - rmse_train: RMSE for training data (regression)
+        - Z_test: Dimension reduced test data (m x K), if X_test provided
+        - Y_pred_test: Predicted Y for test data, if X_test and Y_test provided
+        - rmse_test: RMSE for test data, if X_test and Y_test provided
+    """
+    n, p = X.shape
+    Y = Y.reshape(-1) if Y.ndim == 1 else Y[:, 0]
+
+    scaler_X, scaler_Y = None, None
+    if standardize:
+        scaler_X = StandardScaler()
+        scaler_Y = StandardScaler()
+        X = scaler_X.fit_transform(X)
+        Y = scaler_Y.fit_transform(Y.reshape(-1, 1)).reshape(-1)
+
+    L = compute_kernel(Y, kernel_type, sigma)
+    if L.shape != (n, n):
+        raise ValueError("L must be n x n")
+
+    U_L, S_L, Vt_L = np.linalg.svd(L, hermitian=True)
+    S_L = np.clip(S_L, 0, None)
+    Delta = U_L @ np.diag(np.sqrt(S_L))
+    e = np.ones((n, 1))
+    H = np.eye(n) - (1/n) * (e @ e.T)
+    Psi = Delta.T @ H @ X
+    V = np.zeros((p, K))
+    U = np.zeros((n, K))
+    Lambda = np.zeros(K)
+    Psi_k = Psi.copy()
+
+    for k in range(K):
+        v_k = np.random.randn(p)
+        v_k = v_k / np.linalg.norm(v_k)
+
+        for iter_idx in range(max_iter):
+            v_old = v_k.copy()
+
+            
+            u_k = Psi_k @ v_k
+            if np.linalg.norm(u_k) < 1e-10:
+                print(f"Warning: u_k norm too small at component {k+1}, iteration {iter_idx+1}")
+                u_k = np.random.randn(n)
+
+            
+            if k > 0:
+                u_k = u_k - U[:, :k] @ (U[:, :k].T @ u_k)
+                if np.linalg.norm(u_k) < 1e-10:
+                    print(f"Warning: u_k norm too small after orthogonalization at component {k+1}")
+                    u_k = np.random.randn(n)
+                u_k = u_k / np.linalg.norm(u_k)
+
+            
+            a = Psi_k.T @ u_k
+            tau = find_tau(a, c) 
+            v_k = soft_threshold(a, tau)
+            if np.linalg.norm(v_k) < 1e-10:
+                print(f"Warning: v_k norm too small at component {k+1}, iteration {iter_idx+1}")
+                v_k = np.random.randn(p)
+            v_k = v_k / np.linalg.norm(v_k)
+
+            
+            norm_diff = np.linalg.norm(v_k - v_old)
+            if norm_diff < tol * np.linalg.norm(v_old):
+                if verbose:
+                    print(f"Component {k+1} converged in {iter_idx+1} iterations")
+                break
+        else:
+            print(f"Warning: PMD did not converge for component {k+1} after {max_iter} iterations")
+
+        Lambda[k] = u_k.T @ Psi_k @ v_k
+        U[:, k] = u_k
+        V[:, k] = v_k
+        Psi_k = Psi_k - Lambda[k] * np.outer(u_k, v_k)
+
+    
+    Z = X @ V
+    result = {
+        'Z': Z,
+        'V': V
+    }
+
+    if X_test is not None:
+        Z_test = X_test @ V
+        result['Z_test'] = Z_test
+
+# Supervised Discriminative Sparse PCA (SDSPCA)
+
+class SDSPCA:
+    def __init__(self, n_components=2, alpha=1.0, beta=1.0, max_iter=100, tol=1e-6):
+        self.n_components = n_components
+        self.alpha = alpha
+        self.beta = beta
+        self.max_iter = max_iter
+        self.tol = tol
+        
+    def _create_label_matrix(self, y):
+        """Create the class indicator matrix B from labels y"""
+        classes = np.unique(y)
+        n_classes = len(classes)
+        n_samples = len(y)
+        B = np.zeros((n_classes, n_samples))
+        
+        for i, cls in enumerate(classes):
+            B[i, y == cls] = 1
+            
+        return B
+    
+    def fit(self, X, y):
+        """
+        Fit the model to the data.
+        
+        Parameters:
+        -----------
+        X : array-like, shape (n_samples, n_features)
+            Training data (scikit-learn convention).
+        y : array-like, shape (n_samples,)
+            Target labels.
+        """
+        X = np.asarray(X)
+        y = np.asarray(y)
+        
+        n_samples, n_features = X.shape
+        
+        
+        X = X.T  
+        self.B_ = self._create_label_matrix(y)
+        n_classes = self.B_.shape[0]
+        self.Q_ = np.random.randn(n_samples, self.n_components)
+        self.Q_ = np.linalg.qr(self.Q_)[0]  # Orthogonalize
+        self.V_ = np.eye(n_samples)
+        self.A_ = np.random.randn(n_classes, self.n_components)
+        
+        prev_obj = np.inf
+        
+        for iter_ in range(self.max_iter):
+            self.Y_ = X @ self.Q_
+            self.A_ = self.B_ @ self.Q_
+            
+            
+            XTX = X.T @ X 
+            BTB = self.B_.T @ self.B_  
+            Z = -XTX - self.alpha * BTB + self.beta * self.V_  
+            eigvals, eigvecs = eigh(Z, subset_by_index=[0, self.n_components-1])
+            self.Q_ = eigvecs
+            
+            row_norms = np.linalg.norm(self.Q_, axis=1)
+            self.V_ = np.diag(1. / (2 * np.maximum(row_norms, 1e-16)))
+            current_obj = (
+                np.linalg.norm(X - self.Y_ @ self.Q_.T, 'fro')**2 +
+                self.alpha * np.linalg.norm(self.B_ - self.A_ @ self.Q_.T, 'fro')**2 +
+                self.beta * np.sum(row_norms)
+            )
+            
+            if np.abs(prev_obj - current_obj) < self.tol:
+                break
+                
+            prev_obj = current_obj
+            
+        self.n_iter_ = iter_ + 1
+        
+        return self
+    
+
+
+    def transform(self, X):
+        """
+        Transform data to the principal components.
+        
+        Parameters:
+        -----------
+        X : array-like, shape (n_samples, n_features)
+            Data to transform.
+            
+        Returns:
+        --------
+        Q : array-like, shape (n_samples, n_components)
+            Transformed data.
+        """
+        return X @ self.Y_
+    
+    def fit_transform(self, X, y):
+        """Fit the model and transform the data."""
+        self.fit(X, y)
+        return self.Q_
+    return result
+
+
