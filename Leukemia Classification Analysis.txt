@@ -326,7 +326,6 @@ def run_all_methods_analysis_real_data(X_train, Y_train, X_test, Y_test, n_compo
         clf_sdspca.fit(Q_train, Y_train_main)
         Y_pred_sdspca = clf_sdspca.predict(Q_test)
         Y_pred_proba_sdspca = clf_sdspca.predict_proba(Q_test)[:, 1]
-        print(sdspca.Q_)
         results['precision_SDSPCA'].append(precision_score(Y_test, Y_pred_sdspca, zero_division = 0))
         results['error_SDSPCA'].append(1 - accuracy_score(Y_test, Y_pred_sdspca))
         results['accuracy_SDSPCA'].append(accuracy_score(Y_test, Y_pred_sdspca))
