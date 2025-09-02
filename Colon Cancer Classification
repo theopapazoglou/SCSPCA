@@ -1,0 +1,362 @@
+# For SPCA using HSIC and CSPCA we use the accelerated versions presented in the leukemia classification script. We reduce the number of iterations for SCSPCA and SSPCA to 1000.
+
+def run_all_methods_analysis_real_data(data, n_splits=10, n_components_list=[2],
+                                     threshold=0.1, seed=1924):
+    onp.random.seed(seed)
+    Y = data[:, 0]
+    X = data[:, 1:]
+    p = X.shape[1]
+
+    results = {
+        'n_components': n_components_list,
+        'precision_PCA': [[] for _ in n_components_list],
+        'error_PCA': [[] for _ in n_components_list],
+        'accuracy_PCA': [[] for _ in n_components_list],
+        'non_zero_vars_PCA': [[] for _ in n_components_list],
+        'auc_PCA': [[] for _ in n_components_list],
+        'precision_LDA': [[] for _ in n_components_list],
+        'error_LDA': [[] for _ in n_components_list],
+        'accuracy_LDA': [[] for _ in n_components_list],
+        'non_zero_vars_LDA': [[] for _ in n_components_list],
+        'auc_LDA': [[] for _ in n_components_list],
+        'precision_HSIC': [[] for _ in n_components_list],
+        'error_HSIC': [[] for _ in n_components_list],
+        'accuracy_HSIC': [[] for _ in n_components_list],
+        'non_zero_vars_HSIC': [[] for _ in n_components_list],
+        'auc_HSIC': [[] for _ in n_components_list],
+        'precision_Bair': [[] for _ in n_components_list],
+        'error_Bair': [[] for _ in n_components_list],
+        'accuracy_Bair': [[] for _ in n_components_list],
+        'non_zero_vars_Bair': [[] for _ in n_components_list],
+        'auc_Bair': [[] for _ in n_components_list],
+        'precision_CSPCA': [[] for _ in n_components_list],
+        'error_CSPCA': [[] for _ in n_components_list],
+        'accuracy_CSPCA': [[] for _ in n_components_list],
+        'non_zero_vars_CSPCA': [[] for _ in n_components_list],
+        'auc_SCSPCA': [[] for _ in n_components_list],
+        'precision_SCSPCA': [[] for _ in n_components_list],
+        'error_SCSPCA': [[] for _ in n_components_list],
+        'accuracy_SCSPCA': [[] for _ in n_components_list],
+        'non_zero_vars_SCSPCA': [[] for _ in n_components_list],
+        'auc_SCSPCA': [[] for _ in n_components_list],
+        'precision_SDSPCA': [[] for _ in n_components_list],
+        'error_SDSPCA': [[] for _ in n_components_list],
+        'accuracy_SDSPCA': [[] for _ in n_components_list],
+        'non_zero_vars_SDSPCA': [[] for _ in n_components_list],
+        'auc_SDSPCA': [[] for _ in n_components_list],
+        'precision_SPCA': [[] for _ in n_components_list],
+        'error_SPCA': [[] for _ in n_components_list],
+        'accuracy_SPCA': [[] for _ in n_components_list],
+        'non_zero_vars_SPCA': [[] for _ in n_components_list],
+        'auc_SPCA': [[] for _ in n_components_list],
+        'precision_SSPCA': [[] for _ in n_components_list],
+        'error_SSPCA': [[] for _ in n_components_list],
+        'accuracy_SSPCA': [[] for _ in n_components_list],
+        'non_zero_vars_SSPCA': [[] for _ in n_components_list],
+        'auc_SSPCA': [[] for _ in n_components_list],
+    }
+
+    
+    eta_sparse_grid = [1700,1800,1900,2000,2100,2150]     
+    para_spca_grid = [[0.01,0.01], [0.1,0.1], [0.5,0.5], [1,1]]  
+    c_sspca_grid = [onp.sqrt(p)/32, onp.sqrt(p)/16, onp.sqrt(p)/8, onp.sqrt(p)/4, onp.sqrt(p)/2]     
+
+    for i, n_components in enumerate(n_components_list):
+        for split_idx in range(n_splits):
+            current_seed = seed + split_idx
+
+            X_train_val, X_test, Y_train_val, Y_test = train_test_split(
+                X, Y, test_size=0.2, random_state=current_seed)
+        
+            X_train, X_val, Y_train, Y_val = train_test_split(
+                X_train_val, Y_train_val, test_size=0.25, random_state=current_seed)
+
+            scaler_X = StandardScaler()
+            X_train = scaler_X.fit_transform(X_train)
+            X_val = scaler_X.transform(X_val)
+            X_test = scaler_X.transform(X_test)
+            
+            def count_nonzero_vars(W, threshold=1e-5):
+                if W.ndim == 1:
+                    W = W.reshape(-1, 1)
+                return onp.mean(onp.sum(onp.abs(W) > threshold, axis=0))
+
+            # PCA
+            pca = PCA(n_components=n_components)
+            X_train_pca = pca.fit_transform(X_train)
+            X_test_pca = pca.transform(X_test)
+            clf_pcr = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_pcr.fit(X_train_pca, Y_train)
+            Y_pred = clf_pcr.predict(X_test_pca)
+            Y_pred_proba = clf_pcr.predict_proba(X_test_pca)[:, 1]
+            results['precision_PCA'][i].append(precision_score(Y_test, Y_pred, zero_division = 0))
+            results['error_PCA'][i].append(1 - accuracy_score(Y_test, Y_pred))
+            results['accuracy_PCA'][i].append(accuracy_score(Y_test, Y_pred))
+            results['non_zero_vars_PCA'][i].append(p)
+            results['auc_PCA'][i].append(roc_auc_score(Y_test, Y_pred_proba))
+            
+            # LDA
+            n_comp_lda = min(n_components, len(np.unique(Y_train))-1, X_train.shape[1])
+            lda = LinearDiscriminantAnalysis(n_components=n_comp_lda)
+            X_train_lda = lda.fit_transform(X_train, Y_train)
+            X_test_lda = lda.transform(X_test)
+            Y_pred_lda = lda.predict(X_test)
+            Y_pred_proba_lda = lda.predict_proba(X_test)[:, 1]
+            results['precision_LDA'][i].append(precision_score(Y_test, Y_pred_lda, zero_division=0))
+            results['error_LDA'][i].append(1 - accuracy_score(Y_test, Y_pred_lda))
+            results['accuracy_LDA'][i].append(accuracy_score(Y_test, Y_pred_lda))
+            results['non_zero_vars_LDA'][i].append(p)
+            results['auc_LDA'][i].append(roc_auc_score(Y_test, Y_pred_proba_lda))
+            
+            # SPCA using HSIC
+            K = delta_kernel(Y_train)
+            spca_result = spca_hsic(X_train, Y_train, K, n_components)
+            W_hsic = spca_result['W']
+            Z_test_hsic = X_test @ W_hsic
+            clf_hsic = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_hsic.fit(X_train @ W_hsic, Y_train)
+            Y_pred_hsic = clf_hsic.predict(Z_test_hsic)
+            Y_pred_proba_hsic = clf_hsic.predict_proba(Z_test_hsic)[:, 1]
+            results['precision_HSIC'][i].append(precision_score(Y_test, Y_pred_hsic, zero_division=0))
+            results['error_HSIC'][i].append(1 - accuracy_score(Y_test, Y_pred_hsic))
+            results['accuracy_HSIC'][i].append(accuracy_score(Y_test, Y_pred_hsic))
+            results['non_zero_vars_HSIC'][i].append(count_nonzero_vars(W_hsic))
+            results['auc_HSIC'][i].append(roc_auc_score(Y_test, Y_pred_proba_hsic))
+
+            # Bair's Method
+            feature_scores = onp.abs(onp.corrcoef(X_train.T, Y_train.T)[:-1, -1])
+            selected_features = feature_scores >= threshold
+            X_train_selected = X_train[:, selected_features]
+            X_test_selected = X_test[:, selected_features]
+            pca_bair = PCA(n_components=min(n_components, X_train_selected.shape[1]))
+            X_train_bair = pca_bair.fit_transform(X_train_selected)
+            X_test_bair = pca_bair.transform(X_test_selected)
+            clf_bair = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_bair.fit(X_train_bair, Y_train)
+            Y_pred_bair = clf_bair.predict(X_test_bair)
+            Y_pred_proba_bair = clf_bair.predict_proba(X_test_bair)[:, 1]
+            results['precision_Bair'][i].append(precision_score(Y_test, Y_pred_bair, zero_division=0))
+            results['error_Bair'][i].append(1 - accuracy_score(Y_test, Y_pred_bair))
+            results['accuracy_Bair'][i].append(accuracy_score(Y_test, Y_pred_bair))
+            results['non_zero_vars_Bair'][i].append(onp.sum(selected_features))
+            results['auc_Bair'][i].append(roc_auc_score(Y_test, Y_pred_proba_bair))
+
+            # CSPCA
+            lambda_grid = [0.01, 0.1, 1, 10, 100]
+            best_lambda = lambda_grid[0]
+            best_error = float('inf')
+            for lambda_ in lambda_grid:
+                spca_sup = cspca(X_train, Y_train, n_components, p=p, m=55, lambda_=lambda_)
+                W_sup = spca_sup['W']
+                Z_val_sup = X_val @ W_sup
+                clf_sup = LogisticRegression(solver='lbfgs', max_iter=1000)
+                clf_sup.fit(X_train @ W_sup, Y_train)
+                Y_pred_sup = clf_sup.predict(Z_val_sup)
+                Y_pred_proba_sup = clf_sup.predict_proba(Z_val_sup)[:, 1]
+                current_error = log_loss(Y_val, Y_pred_proba_sup)  
+                if current_error < best_error:
+                  best_error = current_error
+                  best_lambda = lambda_
+            
+            spca_sup = cspca(X_train, Y_train, n_components, p=p, m=145, lambda_=best_lambda)
+            W_sup = spca_sup['W']
+            Z_test_sup = X_test @ W_sup
+            clf_sup = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_sup.fit(X_train @ W_sup, Y_train)
+            Y_pred_sup = clf_sup.predict(Z_test_sup)
+            Y_pred_proba_sup = clf_sup.predict_proba(Z_test_sup)[:, 1]
+            results['precision_CSPCA'][i].append(precision_score(Y_test, Y_pred_sup, zero_division=0))
+            results['error_CSPCA'][i].append(1 - accuracy_score(Y_test, Y_pred_sup))
+            results['accuracy_CSPCA'][i].append(accuracy_score(Y_test, Y_pred_sup))
+            results['non_zero_vars_CSPCA'][i].append(count_nonzero_vars(W_sup))
+            results['auc_CSPCA'][i].append(roc_auc_score(Y_test, Y_pred_proba_sup))
+            
+            # SCSPCA
+            best_eta_sparse = eta_sparse_grid[0]
+            best_error = float('inf')
+            for eta_sparse in eta_sparse_grid:
+               kappa = 1
+               epsilon = 1e-4
+               n = Y_train.shape[0]
+               K = delta_kernel(Y_train) + epsilon * np.eye(n)
+               C = X_train.T @ K @ X_train + kappa * X_train.T @ X_train
+               W_manpg, F_manpg, sparsity, time_manpg, iter_, flag_succ, num_linesearch, mean_ssn = manpg_orth_sparse(
+                  C, n_components, p, eta_sparse * onp.ones(p))
+               X_val_proj = X_val @ W_manpg
+               clf_sparse = LogisticRegression(solver='lbfgs', max_iter=1000)
+               clf_sparse.fit(X_train @ W_manpg, Y_train)
+               Y_pred_sparse = clf_sparse.predict(X_val_proj)
+               Y_pred_proba_sparse = clf_sparse.predict_proba(X_val_proj)[:, 1]
+               current_error = log_loss(Y_val, Y_pred_proba_sparse)  # Using classification error
+               if current_error < best_error:
+                 best_error = current_error
+                 best_eta_sparse = eta_sparse
+            
+            print(f"Selected eta_sparse: {best_eta_sparse}")
+            C = X_train.T @ K @ X_train + kappa * X_train.T @ X_train
+            W_manpg, F_manpg, sparsity, time_manpg, iter_, flag_succ, num_linesearch, mean_ssn = manpg_orth_sparse(
+                C, n_components, p, best_eta_sparse * onp.ones(p))
+            X_test_proj = X_test @ W_manpg
+            clf_sparse = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_sparse.fit(X_train @ W_manpg, Y_train)
+            Y_pred_sparse = clf_sparse.predict(X_test_proj)
+            Y_pred_proba_sparse = clf_sparse.predict_proba(X_test_proj)[:, 1]
+            results['precision_SCSPCA'][i].append(precision_score(Y_test, Y_pred_sparse, zero_division=0))
+            results['error_SCSPCA'][i].append(1 - accuracy_score(Y_test, Y_pred_sparse))
+            results['accuracy_SCSPCA'][i].append(accuracy_score(Y_test, Y_pred_sparse))
+            results['non_zero_vars_SCSPCA'][i].append(count_nonzero_vars(W_manpg))
+            results['auc_SCSPCA'][i].append(roc_auc_score(Y_test, Y_pred_proba_sparse))
+
+            # SDSPCA
+            alpha_grid = [1,10,100,1000,10000,1000000,10000000]
+            beta_grid = [0.000000000000000000001,0.00000000000000000001,0.0000000000000000001,0.000000000000000001,0.00000000000000001,0.0000000000000001,
+                        0.000000000000001,0.00000000000001,0.0000000000001,0.000000000001,0.00000000001]
+
+            best_alpha = alpha_grid[0]
+            best_beta = beta_grid[0]
+            best_error = float('inf')
+            for alpha in alpha_grid:
+               for beta in beta_grid:
+                   sdspca = SDSPCA(n_components=n_components, alpha=alpha, beta=beta)
+                   Q_train = sdspca.fit_transform(X_train, Y_train)
+                   Q_val = sdspca.transform(X_val)
+                   clf = LogisticRegression(solver='lbfgs', max_iter=1000)
+                   clf.fit(Q_train, Y_train)
+                   Y_pred = clf.predict(Q_val)
+                   Y_pred_proba_sdspca = clf.predict_proba(Q_val)[:, 1]
+                   current_error = log_loss(Y_val, Y_pred_proba_sdspca) 
+                   if current_error < best_error:
+                    best_error = current_error
+                    best_alpha = alpha
+                    best_beta = beta       
+
+
+
+            print(f"Best SDSPCA params: alpha={best_alpha}, beta={best_beta}")
+            sdspca = SDSPCA(n_components=n_components, alpha=best_alpha, beta=best_beta)
+            Q_train = sdspca.fit_transform(X_train, Y_train)
+            Q_test = sdspca.transform(X_test)
+            clf_sdspca = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_sdspca.fit(Q_train, Y_train)
+            Y_pred_sdspca = clf_sdspca.predict(Q_test)
+            Y_pred_proba_sdspca = clf_sdspca.predict_proba(Q_test)[:, 1]
+            results['precision_SDSPCA'][i].append(precision_score(Y_test, Y_pred_sdspca, zero_division=0))
+            results['error_SDSPCA'][i].append(1 - accuracy_score(Y_test, Y_pred_sdspca))
+            results['accuracy_SDSPCA'][i].append(accuracy_score(Y_test, Y_pred_sdspca))
+            results['non_zero_vars_SDSPCA'][i].append(count_nonzero_vars(sdspca.Q_))
+            results['auc_SDSPCA'][i].append(roc_auc_score(Y_test, Y_pred_proba_sdspca))
+
+            # SPCA
+            best_para_spca = para_spca_grid[0]
+            best_error = float('inf')
+            for para_spca in para_spca_grid:
+                spca_result = spca(X_train, K=n_components, 
+                     para=para_spca, 
+                     type_="predictor", sparse="penalty", lambda_=1e-4)
+                W_spca = spca_result['loadings']
+                Z_val_spca = X_val @ W_spca
+                clf_spca = LogisticRegression(solver='lbfgs', max_iter=1000)
+                clf_spca.fit(X_train @ W_spca, Y_train)
+                Y_pred_spca = clf_spca.predict(Z_val_spca)
+                Y_pred_proba_spca = clf_spca.predict_proba(Z_val_spca)[:, 1]
+                current_error = log_loss(Y_val, Y_pred_proba_spca)  
+                if current_error < best_error:
+                    best_error = current_error
+                    best_para_spca = para_spca
+
+            print(f"Selected para_spca: {best_para_spca}")
+            spca_result = spca(X_train, K=n_components, 
+                             para=best_para_spca, 
+                             type_="predictor", sparse="penalty", lambda_=1e-4)
+            W_spca = spca_result['loadings']
+            Z_test_spca = X_test @ W_spca
+            clf_spca = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_spca.fit(X_train @ W_spca, Y_train)
+            Y_pred_spca = clf_spca.predict(Z_test_spca)
+            Y_pred_proba_spca = clf_spca.predict_proba(Z_test_spca)[:, 1]
+            results['precision_SPCA'][i].append(precision_score(Y_test, Y_pred_spca, zero_division=0))
+            results['error_SPCA'][i].append(1 - accuracy_score(Y_test, Y_pred_spca))
+            results['accuracy_SPCA'][i].append(accuracy_score(Y_test, Y_pred_spca))
+            results['non_zero_vars_SPCA'][i].append(count_nonzero_vars(W_spca))
+            results['auc_SPCA'][i].append(roc_auc_score(Y_test, Y_pred_proba_spca))
+
+
+            # SSPCA
+            best_c_sspca = c_sspca_grid[0]  
+            best_error = float('inf')
+            for c_sspca in c_sspca_grid:
+                sspca_result = sspca(X_train, Y_train, K=n_components, c=c_sspca, 
+                       X_test=X_val, Y_test=Y_val, kernel_type='delta')
+                Z_val_sspca = sspca_result['Z_test']
+                clf_sspca = LogisticRegression(solver='lbfgs', max_iter=1000)
+                clf_sspca.fit(sspca_result['Z'], Y_train)
+                Y_pred_sspca = clf_sspca.predict(Z_val_sspca)
+                Y_pred_proba_sspca = clf_sspca.predict_proba(Z_val_sspca)[:, 1]
+                current_error =log_loss(Y_val, Y_pred_proba_sspca)  
+                if current_error < best_error:
+                    best_error = current_error
+                    best_c_sspca = c_sspca   
+            
+            print(f"Selected c_sspca: {best_c_sspca}")
+            sspca_result = sspca(X_train, Y_train, K=n_components, c=best_c_sspca, 
+                               X_test=X_test, Y_test=Y_test, kernel_type='delta')
+            Z_test_sspca = sspca_result['Z_test']
+            W_sspca = sspca_result['V']
+            clf_sspca = LogisticRegression(solver='lbfgs', max_iter=1000)
+            clf_sspca.fit(sspca_result['Z'], Y_train)
+            Y_pred_sspca = clf_sspca.predict(Z_test_sspca)
+            Y_pred_proba_sspca = clf_sspca.predict_proba(Z_test_sspca)[:, 1]
+            results['precision_SSPCA'][i].append(precision_score(Y_test, Y_pred_sspca, zero_division=0))
+            results['error_SSPCA'][i].append(1 - accuracy_score(Y_test, Y_pred_sspca))
+            results['accuracy_SSPCA'][i].append(accuracy_score(Y_test, Y_pred_sspca))
+            results['non_zero_vars_SSPCA'][i].append(count_nonzero_vars(W_sspca))
+            results['auc_SSPCA'][i].append(roc_auc_score(Y_test, Y_pred_proba_sspca))
+    
+    
+    methods = ['PCR', 'LDA', 'HSIC', 'Bair', 'CSPCA', 'SCSPCA', 'SDSPCA', 'SPCA', 'SSPCA']
+    final_results = []
+    
+    for i, n_components in enumerate(n_components_list):
+        row = {'n_components': n_components}
+        
+        for method in methods:
+            # Calculate mean and standard error for each metric
+            for metric in ['precision', 'error', 'accuracy', 'non_zero_vars', 'auc']:
+                key = f'{metric}_{method}'
+                values = results[key][i]
+                mean_val = np.mean(values)
+                std_err = np.std(values, ddof=1) / np.sqrt(len(values))
+                
+                row[f'{metric}_{method}_mean'] = mean_val
+                row[f'{metric}_{method}_se'] = std_err
+        
+        final_results.append(row)
+    
+    return pd.DataFrame(final_results)
+
+def analyze_real_dataset(data, n_splits=10, n_components_list=[2]):
+    methods = ['PCR', 'LDA', 'HSIC', 'Bair', 'CSPCA', 'SCSPCA', 'SDSPCA', 'SPCA', 'SSPCA']
+    
+    
+    results_df = run_all_methods_analysis_real_data(data, n_splits=n_splits, 
+                                                  n_components_list=n_components_list)
+    
+    print("\nReal Colon Cancer Classification Analysis Results:")
+    for method in methods:
+        print(f"\nMethod: {method}")
+        for n_comp in n_components_list:
+            row = results_df[results_df['n_components'] == n_comp].iloc[0]
+            print(f"  n_components = {n_comp}:")
+            print(f"    Precision Score: {row[f'precision_{method}_mean']:.4f} ± {row[f'precision_{method}_se']:.4f}")
+            print(f"    Classification Error: {row[f'error_{method}_mean']:.4f} ± {row[f'error_{method}_se']:.4f}")
+            print(f"    Accuracy: {row[f'accuracy_{method}_mean']:.4f} ± {row[f'accuracy_{method}_se']:.4f}")
+            print(f"    Non-zero variables: {row[f'non_zero_vars_{method}_mean']:.1f} ± {row[f'non_zero_vars_{method}_se']:.1f}")
+            print(f"    AUC: {row[f'auc_{method}_mean']:.1f} ± {row[f'auc_{method}_se']:.1f}")
+
+
+data_df = pd.read_csv("colonCA_combined.csv")
+data = data_df.to_numpy()
+print("Dataset shape:", data.shape)
+results = analyze_real_dataset(data, n_splits=10, n_components_list=[2])
+    
+    return results_df
