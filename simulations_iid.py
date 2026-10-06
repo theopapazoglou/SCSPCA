@@ -84,7 +84,7 @@ def run_all_methods_analysis(data, n_splits=1, n_components_list=[2, 3, 4],
             metrics['non_zero_vars_Bair'].append(int(sel.sum()))
             supports['Bair'][i] = sel.astype(bool)
 
-            # CSPCA (tune lambda)
+            # CSPCA 
             best_lambda, best = 0.01, float('inf')
             for lambda_ in [0.01, 0.1, 1, 10, 100]:
                 W = cspca(X_train, Y_train, n_components, lambda_)['W']
@@ -98,7 +98,7 @@ def run_all_methods_analysis(data, n_splits=1, n_components_list=[2, 3, 4],
             metrics['non_zero_vars_CSPCA'].append(count_nonzero_vars(W_cspca))
             supports['CSPCA'][i] = _mask(W_cspca)
 
-            # SCS-PCA (tune eta)
+            # SCS-PCA 
             best_eta, best = eta_sparse_grid[0], float('inf')
             for eta_s in eta_sparse_grid:
                 W = scspca(X_train, Y_train, n_components, eta_s, kappa=kappa)[0]
@@ -112,7 +112,7 @@ def run_all_methods_analysis(data, n_splits=1, n_components_list=[2, 3, 4],
             metrics['non_zero_vars_SCSPCA'].append(count_nonzero_vars(W_scspca))
             supports['SCSPCA'][i] = _mask(W_scspca)
 
-            # SPLS (tune eta); support from betahat (length p)
+            # SPLS 
             best_eta_spls, best = eta_spls_grid[0], float('inf')
             for eta_s in eta_spls_grid:
                 bh = spls(X_train, Y_train, K=n_components, eta=eta_s, kappa=0.2,
@@ -126,7 +126,7 @@ def run_all_methods_analysis(data, n_splits=1, n_components_list=[2, 3, 4],
             metrics['non_zero_vars_SPLS'].append(count_nonzero_vars(bh))
             supports['SPLS'][i] = _mask(bh)
 
-            # SPCA (tune para)
+            # SPCA 
             best_para, best = para_spca_grid[0], float('inf')
             for para in para_spca_grid:
                 W = spca(X_train, K=n_components, para=para, type_="predictor",
@@ -142,7 +142,7 @@ def run_all_methods_analysis(data, n_splits=1, n_components_list=[2, 3, 4],
             metrics['non_zero_vars_SPCA'].append(count_nonzero_vars(W_spca))
             supports['SPCA'][i] = _mask(W_spca)
 
-            # SSPCA (tune c)
+            # SSPCA 
             best_c, best = c_sspca_grid[0], float('inf')
             for c_s in c_sspca_grid:
                 r = sspca(X_train, Y_train, K=n_components, c=c_s, X_test=X_val,
@@ -261,7 +261,6 @@ def run_simulation(n_datasets=100, n=100, p=500, n_splits=1, n_components_list=[
 
 
 def summary_table(sim_out):
-    """Long-format summary (one row per method x q) for saving."""
     rows = []
     for m in METHODS:
         for j, nc in enumerate(sim_out['n_components_list']):
