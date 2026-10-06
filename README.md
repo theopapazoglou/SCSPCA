@@ -14,7 +14,7 @@ It provides the implementation of SCS-PCA, implementations of all competing meth
 # Reproducing the simulation studies
 Run from the repository directory: 
 
-python simulations_iid.py
+python simulations_iid.py $\\$
 python simulations_cor.py
 
 Each script prints, for every method and number of components $q$, the test MSE (mean and s.e.), the number of selected variables, and support recovery (TP,FP,FN,precision,recall,F1), followed by paired Wilcoxon singed-rank and paired $t$-tests of SCS-PCA against each competitor. The scripts run by default the linear simulation (Simulation 1). To run the non-linear simulation (Simulation 2), uncomment the response generation in the 'make_dataset' function for either script. 
