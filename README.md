@@ -102,7 +102,14 @@ python real_analysis_colonca.py
 
 Runs the colon cancer classification analysis (Alon et al., 1999). The dataset is extracted from R's Bioconductor (https://bioconductor.org/packages/release/data/experiment/html/colonCA.html). Its first column is the class label and the remaining columns are gene expression levels. 
 
-The analysis uses 10 random splits (training 60%, validation 20%, test 20%) and $q=2$ components. $X$ is standardised on the training set. Each method's projected training data are used to fit a logistic regression and tuning parameters are chosen by validation log-loss. For the binary response, the supervised methods use the delta kernel.
+The analysis uses 10 random splits (training 60%, validation 20%, test 20%) and $q=2$ components. The splits run in parallel with `joblib`. Split $r$ uses seed $1924+r$, both for the data split and for NumPy's global random generator, which is reset at the start of each split. Results therefore do not depend on the number of parallel jobs or on which worker runs which split. $X$ is standardised on the training set. Each method's projected training data are used to fit a logistic regression and tuning parameters are chosen by validation log-loss. Reported metrics are accuracy, precision, AUC and the number of selected genes. For the binary response, the supervised methods use the delta kernel.
+
+## Reproducibility
+
+All random quantities are seeded:
+
+- **Simulations:** dataset $i$ is generated with seed $123+i$. Within each dataset, the data split uses `random_state=1888` and NumPy's global generator is reset to 1888 before the methods are fitted. The scripts start from `np.random.seed(1924)`.
+- **Real data:** Split $r$ uses `random_state=1924+r`, and NumPy's global generator is reset with `np.random.seed(1924+r)` at the start of each split. The splits run in parallel with joblib, and results are identical for any `n_jobs`.
 
 ## Citation
 
