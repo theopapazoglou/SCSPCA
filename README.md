@@ -11,8 +11,11 @@ It provides the implementation of SCS-PCA, implementations of all competing meth
 Given a standardised predictor matrix $X \in \mathbb{R}^{n\times p}$ and response $Y$, SCS-PCA estimates $q$ sparse, orthonormal loading vectors by solving
 
 $$
-\min_{W\in\mathrm{St}(p,q)}\; -\operatorname{tr}\!\left(W^\top C W\right)+\eta\|W\|_1, \qquad C=X^\top YY^\top X+\kappa X^\top X,
+\min_{W \in \mathrm{St}(p, q)} -\mathrm{tr}\left(W^\top C W\right) + \eta \| W \|_1,
+\qquad
+C = X^\top K X + \kappa \, X^\top X,
 $$
+
 where $\mathrm{St}(p,q)=\{W: W^\top W=I_q\}$ is the Stiefel manifold. The problem is solved with the manifold proximal gradient method (ManPG; Chen et al., 2020), using a regularised semi-smooth Newton method for the proximal subproblem.
 
 ---
