@@ -13,7 +13,7 @@ Given a standardised predictor matrix $X \in \mathbb{R}^{n\times p}$ and respons
 $$
 \min_{W \in \mathrm{St}(p, q)} -\mathrm{tr}\left(W^\top C W\right) + \eta \| W \|_1,
 \qquad
-C = X^\top K X + \kappa \, X^\top X,
+C = X^\top K X + \kappa X^\top X,
 $$
 
 where $\mathrm{St}(p,q)=\{W: W^\top W=I_q\}$ is the Stiefel manifold. The problem is solved with the manifold proximal gradient method (ManPG; Chen et al., 2020), using a regularised semi-smooth Newton method for the proximal subproblem.
