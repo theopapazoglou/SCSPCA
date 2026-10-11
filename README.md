@@ -31,6 +31,7 @@ where $\mathrm{St}(p,q)=\{W: W^\top W=I_q\}$ is the Stiefel manifold. The proble
 | `simulations_iid.py` | Simulation study with independent predictors, including paired Wilcoxon signed-rank tests. |
 | `simulations_cor.py` | Simulation study with correlated predictors, including paired Wilcoxon signed-rank tests. |
 | `real_analysis_colonca.py` | Real analysis implemented on Alon's et al. (1999) colon cancer classification dataset. |
+| `pareto.py` | Pareto front analysis for sparsity-prediction trade-off. |
 | `requirements.txt` | Python package requirements. |
  
 ---
